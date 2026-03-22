@@ -80,7 +80,7 @@ On first launch, you'll need to:
 3. Go to the **Server** tab and click **Start Server**
 
 ### 4. Connect to Streamer.bot
-Click **Open Setup Guide** in the Server tab for step-by-step instructions. The guide walks you through importing the BetterTTS action into Streamer.bot.
+Click **Open Setup Guide** in the Server tab for step-by-step instructions. This will create "Set Global Variable for ttsText" and a C# code block to play the TTS. Add these to whatever actions you want the TTS to trigger, along with the respective text in the global variable.
 
 You can also manually set up the integration using the C# code in `Streamerbot TTS Speak.txt`.
 
@@ -133,7 +133,7 @@ Check that your speakers/headphones are working. In Streamer.bot, make sure the 
 
 ## Support
 
-If you find BetterTTS useful, consider [donating](https://streamelements.com/kindredspiritva/tip) to support development!
+If you find BetterTTS useful, [consider donating to help out!](https://streamelements.com/kindredspiritva/tip)
 
 ---
 

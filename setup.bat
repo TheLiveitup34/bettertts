@@ -210,23 +210,53 @@ goto :skip_nvidia
 :install_nvidia
 echo   NVIDIA GPU detected: !GPU_NAME!
 
+REM Detect GPU generation to pick the right CUDA version
+REM Blackwell consumer (RTX 5000, sm_120) and datacenter (B100/B200, sm_100) need CUDA 12.8+
+REM Everything older (RTX 4000 and below, back to GTX 600) works with CUDA 11.8
+set "NEED_CU128=0"
+REM RTX 5000 series consumer Blackwell (including Ti variants)
+echo !GPU_NAME! | findstr /i "5060 5070 5080 5090" >nul 2>&1
+if !errorlevel! equ 0 set "NEED_CU128=1"
+REM Blackwell datacenter GPUs
+echo !GPU_NAME! | findstr /i "B100 B200 GB200 GB300" >nul 2>&1
+if !errorlevel! equ 0 set "NEED_CU128=1"
+
+if "!NEED_CU128!"=="1" goto :install_cu128
+goto :install_cu118
+
+:install_cu128
 echo.
-echo   Installing PyTorch with CUDA 11.8 (supports ALL NVIDIA GPUs)
-echo   Compatible with: GTX 600/700/900/1000/1600, RTX 2000/3000/4000/5000 series
+echo   Blackwell GPU detected (RTX 5000 series)
+echo   Installing PyTorch with CUDA 12.8 (required for RTX 5000 series)
+echo   This downloads ~2.5 GB on first install, may take several minutes.
+echo.
+pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+if !errorlevel! equ 0 goto :verify_cuda
+echo.
+echo   WARNING: CUDA 12.8 install failed. Trying CUDA 12.4...
+pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+if !errorlevel! equ 0 goto :verify_cuda
+echo.
+echo   WARNING: All CUDA installs failed. Falling back to CPU-only PyTorch.
+pip install --no-cache-dir torch torchvision torchaudio
+goto :verify_cuda
+
+:install_cu118
+echo.
+echo   Installing PyTorch with CUDA 11.8 (supports GTX 600+ through RTX 4000 series)
 echo   This downloads ~2.5 GB on first install, may take several minutes.
 echo.
 pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-if errorlevel 1 (
-    echo.
-    echo   WARNING: CUDA 11.8 install failed. Trying CUDA 12.4...
-    pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-    if errorlevel 1 (
-        echo.
-        echo   WARNING: All CUDA installs failed. Falling back to CPU-only PyTorch.
-        pip install --no-cache-dir torch torchvision torchaudio
-    )
-)
+if !errorlevel! equ 0 goto :verify_cuda
+echo.
+echo   WARNING: CUDA 11.8 install failed. Trying CUDA 12.4...
+pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+if !errorlevel! equ 0 goto :verify_cuda
+echo.
+echo   WARNING: All CUDA installs failed. Falling back to CPU-only PyTorch.
+pip install --no-cache-dir torch torchvision torchaudio
 
+:verify_cuda
 REM Verify CUDA actually works with this GPU
 python -c "import torch; assert torch.cuda.is_available(), 'no cuda'; print('  CUDA test: OK - ' + torch.cuda.get_device_name(0))" 2>nul
 if !errorlevel! neq 0 (

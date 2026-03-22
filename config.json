@@ -1,9 +1,0 @@
-{
-  "model_id": "base-1.7b",
-  "speaker": "Ryan",
-  "language": "English",
-  "instruct": "",
-  "port": 7861,
-  "auto_start_server": false,
-  "show_setup_guide": false
-}
