@@ -1,0 +1,7 @@
+qwen-tts
+fastapi
+uvicorn[standard]
+customtkinter
+soundfile
+sounddevice
+numpy
