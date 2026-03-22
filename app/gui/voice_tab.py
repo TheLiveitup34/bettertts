@@ -220,8 +220,9 @@ class VoiceTab:
                 text="Done!", text_color=C.SUCCESS,
             ))
         except Exception as e:
-            self.parent.after(0, lambda: self.test_status.configure(
-                text=f"Error: {str(e)[:150]}", text_color=C.ERROR,
+            err_msg = f"Error: {str(e)[:150]}"
+            self.parent.after(0, lambda msg=err_msg: self.test_status.configure(
+                text=msg, text_color=C.ERROR,
             ))
         finally:
             self.parent.after(0, lambda: self.test_btn.configure(state="normal", text="Test"))
