@@ -71,6 +71,10 @@ def get_base_dir():
 
 BASE_DIR = get_base_dir()
 
+# On Windows, prevent any subprocess from opening a visible console window
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+
+
 def run(cmd, **kwargs):
     """Run a shell command and return (returncode, stdout+stderr combined)."""
     result = subprocess.run(
@@ -78,9 +82,31 @@ def run(cmd, **kwargs):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        creationflags=_NO_WINDOW,
         **kwargs
     )
     return result.returncode, result.stdout
+
+
+def run_stream(cmd, on_line, **kwargs):
+    """
+    Run a command and call on_line(line) in real time as output arrives.
+    Returns returncode. Use this for long-running installs so the log
+    updates live instead of waiting for the process to finish.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        creationflags=_NO_WINDOW,
+        **kwargs
+    )
+    for line in proc.stdout:
+        on_line(line)
+    proc.wait()
+    return proc.returncode
 
 def detect_gpu():
     """Return (gpu_type, gpu_name) where gpu_type is nvidia/amd/intel/cpu."""
@@ -371,6 +397,7 @@ class SetupWizard(ctk.CTk):
 
         self._task_labels = {}
         tasks = [
+            ("python",  "Install Python 3.12 (if needed)"),
             ("venv",    "Create virtual environment"),
             ("torch",   "Install PyTorch"),
             ("deps",    "Install BetterTTS dependencies"),
@@ -414,11 +441,169 @@ class SetupWizard(ctk.CTk):
 
     # ── The actual install logic (runs in thread) ─────────────────────────────
 
+    def _find_system_python(self):
+        """
+        Find a compatible system Python (3.10-3.12) to create the venv with.
+        If none is found, automatically downloads and installs Python 3.12.
+        When running as a frozen exe sys.executable is BetterTTS.exe, not Python,
+        so we must locate the real Python interpreter explicitly.
+        """
+        import shutil
+        from app.constants import SUPPORTED_PYTHON_VERSIONS
+
+        # Try py launcher first (most reliable on Windows)
+        py = shutil.which("py")
+        if py:
+            for major, minor in reversed(SUPPORTED_PYTHON_VERSIONS):
+                rc, out = run([py, f"-{major}.{minor}", "--version"])
+                if rc == 0:
+                    self._log_write(f"Found Python {major}.{minor} via py launcher\n")
+                    return [py, f"-{major}.{minor}"]
+
+        # Try python3.12, python3.11, python3.10 directly on PATH
+        for major, minor in reversed(SUPPORTED_PYTHON_VERSIONS):
+            name = f"python{major}.{minor}" if sys.platform != "win32" else "python"
+            found = shutil.which(name)
+            if found:
+                rc, out = run([found, "--version"])
+                if rc == 0 and f"{major}.{minor}" in out:
+                    self._log_write(f"Found {found}\n")
+                    return [found]
+
+        # Try plain python/python3 and check version
+        for candidate in ["python3", "python"]:
+            found = shutil.which(candidate)
+            if found:
+                rc, out = run([found, "--version"])
+                if rc == 0:
+                    for major, minor in SUPPORTED_PYTHON_VERSIONS:
+                        if f"{major}.{minor}" in out:
+                            self._log_write(f"Found {found} ({out.strip()})\n")
+                            return [found]
+
+        # No compatible Python found — download and install Python 3.12 automatically
+        self._log_write("\nNo compatible Python found. Downloading Python 3.12...\n")
+        self._set_status("Downloading Python 3.12…")
+        result = self._download_and_install_python()
+        if result:
+            return result
+        return None
+
+    def _download_and_install_python(self):
+        """
+        Download the Python 3.12 installer from python.org and install silently.
+        Returns the python command list if successful, None otherwise.
+        """
+        import shutil
+        import tempfile
+        import urllib.request
+
+        PY_URL = "https://www.python.org/ftp/python/3.12.8/python-3.12.8-amd64.exe"
+        PY_VERSION = "3.12"
+
+        tmp_dir = tempfile.mkdtemp(prefix="bettertts_py_")
+        installer = os.path.join(tmp_dir, "python-3.12-installer.exe")
+
+        try:
+            # Download with progress
+            self._log_write(f"Downloading from {PY_URL}\n")
+
+            def _report(block, block_size, total):
+                if total > 0:
+                    done = block * block_size
+                    pct = min(done / total * 100, 100)
+                    mb_done = done / (1024 * 1024)
+                    mb_total = total / (1024 * 1024)
+                    self._set_status(f"Downloading Python 3.12… {mb_done:.1f}/{mb_total:.1f} MB ({pct:.0f}%)")
+
+            urllib.request.urlretrieve(PY_URL, installer, reporthook=_report)
+            self._log_write("Download complete. Installing Python 3.12...\n")
+            self._set_status("Installing Python 3.12…")
+
+            # Silent install — current user only, add to PATH, include py launcher
+            rc, out = run([
+                installer,
+                "/quiet",
+                "InstallAllUsers=0",
+                "PrependPath=1",
+                "Include_test=0",
+                "Include_launcher=1",
+            ])
+            self._log_write(out or "(no output)\n")
+
+            if rc != 0:
+                self._log_write(f"Installer exited with code {rc}\n")
+                return None
+
+            self._log_write("Python 3.12 installed.\n")
+
+            # Refresh PATH in current process so we can find the new python
+            import winreg
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+                    user_path, _ = winreg.QueryValueEx(key, "Path")
+                    os.environ["PATH"] = user_path + os.pathsep + os.environ.get("PATH", "")
+            except Exception:
+                pass
+
+            # Try py launcher first after install
+            py = shutil.which("py")
+            if py:
+                rc, out = run([py, f"-{PY_VERSION}", "--version"])
+                if rc == 0:
+                    self._log_write(f"Python {PY_VERSION} ready via py launcher\n")
+                    return [py, f"-{PY_VERSION}"]
+
+            # Try direct python path
+            for candidate in [f"python{PY_VERSION}", "python3", "python"]:
+                found = shutil.which(candidate)
+                if found:
+                    rc, out = run([found, "--version"])
+                    if rc == 0 and PY_VERSION in out:
+                        self._log_write(f"Python {PY_VERSION} ready at {found}\n")
+                        return [found]
+
+            self._log_write("Python installed but not found on PATH yet.\n")
+            self._log_write("Please close and reopen BetterTTS to complete setup.\n")
+            return None
+
+        except Exception as e:
+            self._log_write(f"Failed to download/install Python: {e}\n")
+            return None
+        finally:
+            try:
+                import shutil as _shutil
+                _shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
+
     def _run_install(self):
-        steps = 5
+        steps = 6
         step = 0
 
-        # 1. Virtual environment
+        # 1. Find / install Python
+        self.after(0, lambda: self._set_task("python", "running"))
+        self._set_status("Locating Python…")
+        self._log_write("── Checking for compatible Python ──\n")
+
+        python_cmd = self._find_system_python()
+        if not python_cmd:
+            self.after(0, lambda: self._set_task("python", "error"))
+            self._set_status("Could not install Python 3.12.", "#ef5350")
+            self.after(0, self._show_error(
+                "Could not find or install Python 3.12.\n\n"
+                "Please download it manually from:\n"
+                "https://www.python.org/downloads/release/python-3128/\n\n"
+                "Make sure to check 'Add Python to PATH' during installation,\n"
+                "then relaunch BetterTTS."
+            ))
+            return
+
+        self.after(0, lambda: self._set_task("python", "done"))
+        step += 1
+        self._set_progress(step / steps)
+
+        # 2. Virtual environment
         self.after(0, lambda: self._set_task("venv", "running"))
         self._set_status("Creating virtual environment…")
         self._log_write("── Creating venv ──\n")
@@ -427,7 +612,7 @@ class SetupWizard(ctk.CTk):
         if os.path.exists(venv_path):
             self._log_write("venv already exists, reusing.\n")
         else:
-            rc, out = run([sys.executable, "-m", "venv", venv_path])
+            rc, out = run(python_cmd + ["-m", "venv", venv_path])
             self._log_write(out or "(no output)\n")
             if rc != 0:
                 self.after(0, lambda: self._set_task("venv", "error"))
@@ -460,19 +645,27 @@ class SetupWizard(ctk.CTk):
                 self._set_status("Installing PyTorch (CUDA 11.8)…")
                 self._log_write("\n── Installing PyTorch cu118 ──\n")
 
-            rc, out = run([pip, "install", "--no-cache-dir", "torch", "torchvision", "torchaudio",
-                           "--index-url", torch_url])
-            self._log_write(out)
+            rc = run_stream(
+                [pip, "install", "--no-cache-dir", "--progress-bar", "on",
+                 "torch", "torchvision", "torchaudio", "--index-url", torch_url],
+                on_line=self._log_write
+            )
 
             if rc != 0:
                 self._log_write("\nCUDA install failed, trying CPU fallback…\n")
-                rc, out = run([pip, "install", "--no-cache-dir", "torch", "torchvision", "torchaudio"])
-                self._log_write(out)
+                rc = run_stream(
+                    [pip, "install", "--no-cache-dir", "--progress-bar", "on",
+                     "torch", "torchvision", "torchaudio"],
+                    on_line=self._log_write
+                )
         else:
             self._set_status("Installing PyTorch (CPU)…")
             self._log_write("\n── Installing PyTorch (CPU) ──\n")
-            rc, out = run([pip, "install", "--no-cache-dir", "torch", "torchvision", "torchaudio"])
-            self._log_write(out)
+            rc = run_stream(
+                [pip, "install", "--no-cache-dir", "--progress-bar", "on",
+                 "torch", "torchvision", "torchaudio"],
+                on_line=self._log_write
+            )
 
         if rc != 0:
             self.after(0, lambda: self._set_task("torch", "error"))
@@ -489,8 +682,10 @@ class SetupWizard(ctk.CTk):
         self._log_write("\n── pip install -r requirements.txt ──\n")
 
         req_path = os.path.join(BASE_DIR, "requirements.txt")
-        rc, out = run([pip, "install", "--no-cache-dir", "-r", req_path])
-        self._log_write(out)
+        rc = run_stream(
+            [pip, "install", "--no-cache-dir", "--progress-bar", "on", "-r", req_path],
+            on_line=self._log_write
+        )
 
         if rc != 0:
             self.after(0, lambda: self._set_task("deps", "error"))
@@ -603,7 +798,8 @@ class SetupWizard(ctk.CTk):
             main_path = os.path.join(BASE_DIR, "app", "main.py")
             if not os.path.exists(main_path):
                 main_path = os.path.join(BASE_DIR, "main.py")
-            subprocess.Popen([python, main_path], cwd=BASE_DIR)
+            NO_WINDOW = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+            subprocess.Popen([python, main_path], cwd=BASE_DIR, creationflags=NO_WINDOW)
         self.destroy()
 
     def _show_error(self, msg):

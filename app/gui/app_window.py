@@ -21,6 +21,44 @@ class AppWindow(ctk.CTk):
         self.title("BetterTTS")
         apply_window_theme(self)
 
+        # Set window icon — must be done after window is fully initialized
+        # customtkinter overrides iconbitmap so we use after() to set it last
+        try:
+            from app.updater import get_base_dir
+            icon_path = get_base_dir() / "icon.ico"
+            if icon_path.exists():
+                self._icon_path = str(icon_path)
+                self.after(0, self._set_icon)
+        except Exception:
+            pass
+
+    def _set_icon(self):
+        try:
+            self.iconbitmap(self._icon_path)
+            self.wm_iconbitmap(self._icon_path)
+        except Exception:
+            pass
+
+        # Force Windows taskbar to use our icon instead of the Python exe icon
+        try:
+            import ctypes
+            # Set a unique AppUserModelID so Windows treats this as its own app
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "BetterTTS.App"
+            )
+            # Load the icon and set it on the window handle directly
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            if not hwnd:
+                hwnd = self.winfo_id()
+            icon = ctypes.windll.user32.LoadImageW(
+                0, self._icon_path, 1, 0, 0, 0x10 | 0x2
+            )
+            if icon:
+                ctypes.windll.user32.SendMessageW(hwnd, 0x0080, 1, icon)  # WM_SETICON ICON_BIG
+                ctypes.windll.user32.SendMessageW(hwnd, 0x0080, 0, icon)  # WM_SETICON ICON_SMALL
+        except Exception:
+            pass
+
         self.config_data = load_config()
         self.gpu_info = get_gpu_info()
 
@@ -301,6 +339,7 @@ class AppWindow(ctk.CTk):
             daemon=True
         ).start()
 
+    # ── Rest of app ───────────────────────────────────────────────────────────
 
     def _show_setup_wizard(self):
         from app.gui.setup_wizard import SetupWizard

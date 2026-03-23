@@ -1,16 +1,22 @@
 """
 updater.py — Auto-update system for BetterTTS
 - Checks GitHub releases for newer versions
-- Downloads and applies updates with atomic swap
+- Downloads and applies updates via update_helper.exe
 - Crash protection via startup flag
 - Auto-rollback if new version fails to start cleanly
+
+Structure after update:
+  BetterTTS.exe          <- onefile launcher (updated)
+  app\                   <- source files run by venv Python (updated)
+  venv\                  <- NOT updated (user's installed deps stay)
+  update_helper.exe      <- NOT updated (can't replace itself)
+  requirements.txt       <- updated (in case deps changed)
 """
 
 import sys
 import os
 import json
 import shutil
-import hashlib
 import threading
 import zipfile
 import tempfile
@@ -19,16 +25,12 @@ from pathlib import Path
 from typing import Optional, Callable
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
+import subprocess
 
-GITHUB_API_URL = "https://api.github.com/repos/TheLiveitup34/bettertts/releases/latest"
-GITHUB_REPO_URL = "https://github.com/TheLiveitup34/bettertts"
-UPDATE_CHECK_TIMEOUT = 10  # seconds
-
-# Written on launch, deleted after clean startup — used for crash detection
+GITHUB_API_URL = "https://api.github.com/repos/rubensbonc/bettertts/releases/latest"
+UPDATE_CHECK_TIMEOUT = 10
 STARTUP_FLAG_NAME = ".startup_in_progress"
-# Folder containing backup of previous working version
 BACKUP_DIR_NAME = "_backup"
-# File storing the current version string
 VERSION_FILE_NAME = "version.txt"
 
 
@@ -39,7 +41,6 @@ def get_base_dir() -> Path:
 
 
 def get_current_version() -> str:
-    """Read version from version.txt next to the exe, fallback to 0.0.0."""
     version_file = get_base_dir() / VERSION_FILE_NAME
     if version_file.exists():
         return version_file.read_text().strip()
@@ -47,7 +48,6 @@ def get_current_version() -> str:
 
 
 def _parse_version(version_str: str) -> tuple:
-    """Parse a version string like 'v1.2.3' or '1.2.3' into a tuple."""
     clean = version_str.lstrip("v").strip()
     try:
         return tuple(int(x) for x in clean.split("."))
@@ -62,7 +62,6 @@ def _is_newer(latest: str, current: str) -> bool:
 # ── Crash protection ──────────────────────────────────────────────────────────
 
 def write_startup_flag():
-    """Call this at the very start of launch. Indicates startup is in progress."""
     flag = get_base_dir() / STARTUP_FLAG_NAME
     try:
         flag.write_text(str(time.time()))
@@ -71,7 +70,6 @@ def write_startup_flag():
 
 
 def clear_startup_flag():
-    """Call this once the app has fully loaded successfully."""
     flag = get_base_dir() / STARTUP_FLAG_NAME
     try:
         if flag.exists():
@@ -81,10 +79,6 @@ def clear_startup_flag():
 
 
 def check_and_rollback() -> bool:
-    """
-    Check if startup flag exists from a previous run — means it crashed.
-    If so, attempt rollback from backup. Returns True if rollback was performed.
-    """
     base = get_base_dir()
     flag = base / STARTUP_FLAG_NAME
     backup_dir = base / BACKUP_DIR_NAME
@@ -92,12 +86,10 @@ def check_and_rollback() -> bool:
     if not flag.exists():
         return False
 
-    # Startup flag found — previous launch crashed before clearing it
     print("[Updater] Crash detected from previous launch. Checking for backup...")
 
     if not backup_dir.exists():
         print("[Updater] No backup found, cannot rollback.")
-        # Clear the flag so we don't loop forever
         try:
             flag.unlink()
         except Exception:
@@ -108,9 +100,7 @@ def check_and_rollback() -> bool:
     try:
         _apply_rollback(base, backup_dir)
         flag.unlink()
-        print("[Updater] Rollback successful. Restarting...")
-        # Restart the exe after rollback
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        print("[Updater] Rollback successful.")
     except Exception as e:
         print(f"[Updater] Rollback failed: {e}")
         try:
@@ -122,21 +112,25 @@ def check_and_rollback() -> bool:
 
 
 def _apply_rollback(base: Path, backup_dir: Path):
-    """Restore _internal and exe from backup."""
-    internal_dir = base / "_internal"
-    exe_path = Path(sys.executable)
+    """Restore app\ folder and exe from backup."""
+    # Restore app\ folder
+    backup_app = backup_dir / "app"
+    current_app = base / "app"
+    if backup_app.exists():
+        if current_app.exists():
+            shutil.rmtree(current_app)
+        shutil.copytree(backup_app, current_app)
 
-    # Restore _internal
-    backup_internal = backup_dir / "_internal"
-    if backup_internal.exists():
-        if internal_dir.exists():
-            shutil.rmtree(internal_dir)
-        shutil.copytree(backup_internal, internal_dir)
-
-    # Restore exe
-    backup_exe = backup_dir / exe_path.name
+    # Restore launcher exe
+    exe_name = Path(sys.executable).name
+    backup_exe = backup_dir / exe_name
     if backup_exe.exists():
-        shutil.copy2(backup_exe, exe_path)
+        shutil.copy2(backup_exe, base / exe_name)
+
+    # Restore requirements.txt
+    backup_req = backup_dir / "requirements.txt"
+    if backup_req.exists():
+        shutil.copy2(backup_req, base / "requirements.txt")
 
     print("[Updater] Restored from backup.")
 
@@ -144,10 +138,6 @@ def _apply_rollback(base: Path, backup_dir: Path):
 # ── Update checking ───────────────────────────────────────────────────────────
 
 def fetch_latest_release() -> Optional[dict]:
-    """
-    Query GitHub API for the latest release.
-    Returns dict with 'tag_name' and 'assets', or None on failure.
-    """
     try:
         req = Request(
             GITHUB_API_URL,
@@ -170,12 +160,10 @@ def fetch_latest_release() -> Optional[dict]:
 
 
 def find_windows_asset(release: dict) -> Optional[dict]:
-    """Find the Windows zip asset in a release."""
     for asset in release.get("assets", []):
         name = asset.get("name", "").lower()
         if name.endswith(".zip") and "windows" in name:
             return asset
-    # Fallback: just grab the first zip
     for asset in release.get("assets", []):
         if asset.get("name", "").lower().endswith(".zip"):
             return asset
@@ -183,10 +171,6 @@ def find_windows_asset(release: dict) -> Optional[dict]:
 
 
 def check_for_update() -> Optional[dict]:
-    """
-    Check if a newer version is available.
-    Returns release dict if update available, None otherwise.
-    """
     release = fetch_latest_release()
     if not release:
         return None
@@ -211,7 +195,6 @@ def check_for_update() -> Optional[dict]:
 # ── Downloading & applying ────────────────────────────────────────────────────
 
 def download_file(url: str, dest: Path, on_progress: Optional[Callable] = None):
-    """Download a file with optional progress callback(bytes_done, total_bytes)."""
     req = Request(url, headers={"User-Agent": "BetterTTS-Updater"})
     with urlopen(req, timeout=60) as resp:
         total = int(resp.headers.get("Content-Length", 0))
@@ -229,28 +212,31 @@ def download_file(url: str, dest: Path, on_progress: Optional[Callable] = None):
 
 
 def _backup_current(base: Path):
-    """Back up current exe and _internal to _backup folder."""
     backup_dir = base / BACKUP_DIR_NAME
     if backup_dir.exists():
         shutil.rmtree(backup_dir)
     backup_dir.mkdir()
 
-    internal_dir = base / "_internal"
-    if internal_dir.exists():
-        shutil.copytree(internal_dir, backup_dir / "_internal")
+    # Backup app\ folder
+    app_dir = base / "app"
+    if app_dir.exists():
+        shutil.copytree(app_dir, backup_dir / "app")
 
-    exe_path = Path(sys.executable)
-    if exe_path.exists():
-        shutil.copy2(exe_path, backup_dir / exe_path.name)
+    # Backup launcher exe (BetterTTS.exe, not sys.executable which is venv python)
+    launcher = base / "BetterTTS.exe"
+    if launcher.exists():
+        shutil.copy2(launcher, backup_dir / "BetterTTS.exe")
 
-    print(f"[Updater] Backed up current version to {backup_dir}")
+    # Backup requirements.txt
+    req_path = base / "requirements.txt"
+    if req_path.exists():
+        shutil.copy2(req_path, backup_dir / "requirements.txt")
+
+    print(f"[Updater] Backed up to {backup_dir}")
 
 
 def apply_update(zip_path: Path, on_status: Optional[Callable] = None):
-    """
-    Extract zip and swap in the new version.
-    on_status(message) called with progress updates.
-    """
+
     base = get_base_dir()
 
     def status(msg):
@@ -262,58 +248,49 @@ def apply_update(zip_path: Path, on_status: Optional[Callable] = None):
     _backup_current(base)
 
     status("Extracting update...")
-    tmp_dir = Path(tempfile.mkdtemp(prefix="bettertts_update_"))
-    try:
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(tmp_dir)
 
-        # Find the extracted root folder (zip may have a top-level folder)
-        extracted_items = list(tmp_dir.iterdir())
-        if len(extracted_items) == 1 and extracted_items[0].is_dir():
-            extracted_root = extracted_items[0]
-        else:
-            extracted_root = tmp_dir
+    # Stage next to the exe so it's on the same drive
+    staging_dir = base / "_update_staging"
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+    staging_dir.mkdir()
 
-        status("Applying update...")
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(staging_dir)
 
-        # Swap _internal
-        new_internal = extracted_root / "_internal"
-        if new_internal.exists():
-            current_internal = base / "_internal"
-            if current_internal.exists():
-                shutil.rmtree(current_internal)
-            shutil.copytree(new_internal, current_internal)
+    # Unwrap single top-level folder into staging_dir directly
+    items = list(staging_dir.iterdir())
+    if len(items) == 1 and items[0].is_dir():
+        inner = items[0]
+        for item in inner.iterdir():
+            shutil.move(str(item), str(staging_dir / item.name))
+        inner.rmdir()
 
-        # Swap exe
-        exe_name = Path(sys.executable).name
-        new_exe = extracted_root / exe_name
-        if new_exe.exists():
-            # On Windows we can't replace a running exe directly
-            # Rename current exe to .old then copy new one in
-            current_exe = Path(sys.executable)
-            old_exe = current_exe.with_suffix(".old")
-            if old_exe.exists():
-                old_exe.unlink()
-            current_exe.rename(old_exe)
-            shutil.copy2(new_exe, current_exe)
+    status("Scheduling update — closing app to apply...")
 
-        # Update version file
-        new_version_file = extracted_root / VERSION_FILE_NAME
-        if new_version_file.exists():
-            shutil.copy2(new_version_file, base / VERSION_FILE_NAME)
+    # Find update_helper.exe next to BetterTTS.exe
+    helper = base / "update_helper.exe"
 
-        status("Update applied successfully.")
+    if helper.exists():
+        cmd = [str(helper), str(os.getpid()), str(staging_dir), str(base)]
+    else:
+        # Fallback to python script for development
+        helper_py = base / "app" / "update_helper.py"
+        cmd = [sys.executable, str(helper_py), str(os.getpid()), str(staging_dir), str(base)]
 
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+    subprocess.Popen(
+        cmd,
+        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+        close_fds=True,
+    )
 
 
 def cleanup_old_exe():
-    """Remove leftover .old exe from previous update if it exists."""
-    old_exe = Path(sys.executable).with_suffix(".old")
-    if old_exe.exists():
+    base = get_base_dir()
+    staging = base / "_update_staging"
+    if staging.exists():
         try:
-            old_exe.unlink()
+            shutil.rmtree(staging)
         except Exception:
             pass
 
@@ -321,14 +298,6 @@ def cleanup_old_exe():
 # ── High level API ────────────────────────────────────────────────────────────
 
 class Updater:
-    """
-    High-level updater. Use this in the app.
-
-    Usage:
-        updater = Updater(on_update_available=my_callback)
-        updater.check_async()   # non-blocking background check
-    """
-
     def __init__(
         self,
         on_update_available: Optional[Callable] = None,
@@ -343,9 +312,7 @@ class Updater:
         self._update_info: Optional[dict] = None
 
     def check_async(self):
-        """Check for updates in a background thread."""
-        t = threading.Thread(target=self._check_worker, daemon=True)
-        t.start()
+        threading.Thread(target=self._check_worker, daemon=True).start()
 
     def _check_worker(self):
         update = check_for_update()
@@ -354,9 +321,9 @@ class Updater:
             self._on_update_available(update["version"])
 
     def download_and_apply(self):
-        """Download and apply the pending update. Call from a background thread."""
         if not self._update_info:
             return
+
         asset = self._update_info["asset"]
         url = asset["browser_download_url"]
         version = self._update_info["version"]
@@ -369,16 +336,17 @@ class Updater:
             download_file(url, tmp_zip, on_progress=self._on_download_progress)
 
             if self._on_status:
-                self._on_status("Applying update...")
+                self._on_status("Preparing update...")
 
             apply_update(tmp_zip, on_status=self._on_status)
 
             if self._on_status:
-                self._on_status("Restarting...")
+                self._on_status("Closing to apply update...")
 
-            # Restart into the new version
-            time.sleep(1)
-            os.execv(sys.executable, [sys.executable] + sys.argv)
+            # Give UI time to show status then exit cleanly
+            # update_helper will relaunch BetterTTS.exe after the swap
+            time.sleep(2)
+            os._exit(0)
 
         except Exception as e:
             print(f"[Updater] Update failed: {e}")
@@ -386,4 +354,7 @@ class Updater:
                 self._on_error(str(e))
         finally:
             if tmp_zip.exists():
-                tmp_zip.unlink(missing_ok=True)
+                try:
+                    tmp_zip.unlink()
+                except Exception:
+                    pass
