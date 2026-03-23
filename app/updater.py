@@ -27,7 +27,7 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 import subprocess
 
-GITHUB_API_URL = "https://api.github.com/repos/rubensbonc/bettertts/releases/latest"
+GITHUB_API_URL = "https://api.github.com/repos/theliveitup34/bettertts/releases/latest"
 UPDATE_CHECK_TIMEOUT = 10
 STARTUP_FLAG_NAME = ".startup_in_progress"
 BACKUP_DIR_NAME = "_backup"
@@ -165,8 +165,10 @@ def fetch_latest_release() -> Optional[dict]:
 def find_windows_asset(release: dict) -> Optional[dict]:
     for asset in release.get("assets", []):
         name = asset.get("name", "").lower()
-        if name.endswith(".zip") and "windows" in name:
+        # Match bettertts-x64-*.zip or any windows zip
+        if name.endswith(".zip") and ("windows-x64" in name or "bettertts" in name):
             return asset
+    # Fallback: grab the first zip
     for asset in release.get("assets", []):
         if asset.get("name", "").lower().endswith(".zip"):
             return asset
@@ -352,7 +354,10 @@ class Updater:
         url = asset["browser_download_url"]
         version = self._update_info["version"]
 
-        tmp_zip = Path(tempfile.mktemp(suffix=".zip", prefix="bettertts_"))
+        # mkstemp atomically creates the file and returns an open fd — secure
+        fd, tmp_zip_str = tempfile.mkstemp(suffix=".zip", prefix="bettertts_")
+        os.close(fd)  # close fd immediately, download_file will reopen it
+        tmp_zip = Path(tmp_zip_str)
         try:
             if self._on_status:
                 self._on_status(f"Downloading {version}...")
