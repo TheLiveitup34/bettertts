@@ -178,6 +178,14 @@ class SetupWizard(ctk.CTk):
         self._setup_thread = None
         self._cancelled = False
 
+        # Set icon after window initializes
+        icon_path = os.path.join(BASE_DIR, "icon.ico")
+        if os.path.exists(icon_path):
+            self.after(0, lambda: (
+                self.iconbitmap(icon_path),
+                self.wm_iconbitmap(icon_path),
+            ))
+
         self._build_ui()
         self._show_step_welcome()
 
@@ -279,10 +287,65 @@ class SetupWizard(ctk.CTk):
             text="I have installed SoX (or I don't need voice cloning right now)",
             variable=self._sox_var,
             font=ctk.CTkFont(size=12)
-        ).pack(anchor="w", pady=(0, 24))
+        ).pack(anchor="w", pady=(0, 16))
+
+        # Cache status + clear button
+        cache_dir = os.path.join(
+            os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+            "BetterTTS", "pip_cache"
+        )
+        cache_stamp = os.path.join(
+            os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+            "BetterTTS", ".cache_stamp"
+        )
+        cache_exists = os.path.exists(cache_dir) and any(True for _ in os.scandir(cache_dir) if True)
+
+        if cache_exists:
+            cache_row = ctk.CTkFrame(self._content, fg_color="transparent")
+            cache_row.pack(fill="x", pady=(0, 16))
+
+            try:
+                import time as _t
+                age = _t.time() - float(open(cache_stamp).read().strip())
+                cache_info = f"Download cache available ({age/60:.0f}m old) — reinstall will be faster"
+                cache_color = "#66bb6a"
+            except Exception:
+                cache_info = "Download cache available — reinstall will be faster"
+                cache_color = "#66bb6a"
+
+            ctk.CTkLabel(
+                cache_row, text=f"✓  {cache_info}",
+                font=ctk.CTkFont(size=11),
+                text_color=cache_color,
+            ).pack(side="left")
+
+            def _clear_cache():
+                try:
+                    import shutil as _sh
+                    _sh.rmtree(cache_dir, ignore_errors=True)
+                    if os.path.exists(cache_stamp):
+                        os.remove(cache_stamp)
+                    clear_btn.configure(text="Cleared ✓", state="disabled",
+                                        fg_color="#334155", text_color="#64748b")
+                    cache_label.configure(text="Cache cleared.", text_color="#64748b")
+                except Exception:
+                    pass
+
+            cache_label = cache_row.winfo_children()[0]
+            clear_btn = ctk.CTkButton(
+                cache_row, text="Clear Cache", width=100, height=26,
+                fg_color="#334155", hover_color="#475569",
+                text_color="#94a3b8", corner_radius=6,
+                font=ctk.CTkFont(size=11),
+                command=_clear_cache,
+            )
+            clear_btn.pack(side="right")
+
+        btn_row = ctk.CTkFrame(self._content, fg_color="transparent")
+        btn_row.pack(fill="x")
 
         ctk.CTkButton(
-            self._content,
+            btn_row,
             text="Next →",
             font=ctk.CTkFont(size=13, weight="bold"),
             width=140, height=38,
@@ -630,42 +693,93 @@ class SetupWizard(ctk.CTk):
             self._set_status("Could not find venv pip/python.", "#ef5350")
             return
 
+        # ── Persistent pip cache ──────────────────────────────────────────────────
+        # Stored in %LOCALAPPDATA%\BetterTTS\pip_cache
+        # Expires after 3 hours — fast reinstall within that window,
+        # auto-cleared after so it doesn't permanently use disk space.
+        import time as _time
+        CACHE_MAX_AGE = 3 * 3600  # 3 hours in seconds
+
+        cache_dir = os.path.join(
+            os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+            "BetterTTS", "pip_cache"
+        )
+        cache_stamp = os.path.join(
+            os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+            "BetterTTS", ".cache_stamp"
+        )
+
+        # Check if cache has expired
+        if os.path.exists(cache_stamp):
+            try:
+                created_at = float(open(cache_stamp).read().strip())
+                age = _time.time() - created_at
+                if age > CACHE_MAX_AGE:
+                    self._log_write(f"pip cache expired ({age/3600:.1f}h old) — clearing...\n")
+                    shutil.rmtree(cache_dir, ignore_errors=True)
+                    os.remove(cache_stamp)
+                else:
+                    self._log_write(f"pip cache valid ({age/60:.0f}m old, expires in {(CACHE_MAX_AGE-age)/60:.0f}m)\n")
+            except Exception:
+                pass
+
+        # Create cache dir and stamp
+        os.makedirs(cache_dir, exist_ok=True)
+        if not os.path.exists(cache_stamp):
+            try:
+                with open(cache_stamp, "w") as f:
+                    f.write(str(_time.time()))
+            except Exception:
+                pass
+
+        self._log_write(f"Using pip cache: {cache_dir}\n")
+        PIP_CACHE = ["--cache-dir", cache_dir]
+
         # 2. PyTorch
         self.after(0, lambda: self._set_task("torch", "running"))
         gpu_type = self._detected_gpu_type
         gpu_name = self._detected_gpu_name
 
-        if gpu_type == "nvidia":
-            if is_blackwell(gpu_name):
-                torch_url = "https://download.pytorch.org/whl/cu128"
-                self._set_status("Installing PyTorch (CUDA 12.8 — Blackwell)…")
-                self._log_write("\n── Installing PyTorch cu128 ──\n")
-            else:
-                torch_url = "https://download.pytorch.org/whl/cu118"
-                self._set_status("Installing PyTorch (CUDA 11.8)…")
-                self._log_write("\n── Installing PyTorch cu118 ──\n")
+        # Check if torch is already installed and skip if so
+        rc_check, out_check = run([pip, "show", "torch"])
+        torch_installed = rc_check == 0 and "torch" in out_check.lower()
 
-            rc = run_stream(
-                [pip, "install", "--no-cache-dir", "--progress-bar", "on",
-                 "torch", "torchvision", "torchaudio", "--index-url", torch_url],
-                on_line=self._log_write
-            )
+        if torch_installed:
+            self._log_write("PyTorch already installed — skipping.\n")
+            self._set_status("PyTorch already installed ✓")
+            rc = 0
+        else:
+            if gpu_type == "nvidia":
+                if is_blackwell(gpu_name):
+                    torch_url = "https://download.pytorch.org/whl/cu128"
+                    self._set_status("Installing PyTorch (CUDA 12.8 — Blackwell)…")
+                    self._log_write("\n── Installing PyTorch cu128 ──\n")
+                else:
+                    torch_url = "https://download.pytorch.org/whl/cu118"
+                    self._set_status("Installing PyTorch (CUDA 11.8)…")
+                    self._log_write("\n── Installing PyTorch cu118 ──\n")
 
-            if rc != 0:
-                self._log_write("\nCUDA install failed, trying CPU fallback…\n")
                 rc = run_stream(
-                    [pip, "install", "--no-cache-dir", "--progress-bar", "on",
+                    [pip, "install", "--progress-bar", "on"] + PIP_CACHE + [
+                     "torch", "torchvision", "torchaudio", "--index-url", torch_url],
+                    on_line=self._log_write
+                )
+
+                if rc != 0:
+                    self._log_write("\nCUDA install failed, trying CPU fallback…\n")
+                    rc = run_stream(
+                        [pip, "install", "--progress-bar", "on"] + PIP_CACHE + [
+                         "torch", "torchvision", "torchaudio"],
+                        on_line=self._log_write
+                    )
+            else:
+                self._set_status("Installing PyTorch (CPU)…")
+                self._log_write("\n── Installing PyTorch (CPU) ──\n")
+                rc = run_stream(
+                    [pip, "install", "--progress-bar", "on"] + PIP_CACHE + [
                      "torch", "torchvision", "torchaudio"],
                     on_line=self._log_write
                 )
-        else:
-            self._set_status("Installing PyTorch (CPU)…")
-            self._log_write("\n── Installing PyTorch (CPU) ──\n")
-            rc = run_stream(
-                [pip, "install", "--no-cache-dir", "--progress-bar", "on",
-                 "torch", "torchvision", "torchaudio"],
-                on_line=self._log_write
-            )
 
         if rc != 0:
             self.after(0, lambda: self._set_task("torch", "error"))
@@ -678,14 +792,43 @@ class SetupWizard(ctk.CTk):
 
         # 3. Requirements
         self.after(0, lambda: self._set_task("deps", "running"))
-        self._set_status("Installing BetterTTS dependencies…")
-        self._log_write("\n── pip install -r requirements.txt ──\n")
 
+        # Check if requirements hash matches last install — skip if unchanged
         req_path = os.path.join(BASE_DIR, "requirements.txt")
-        rc = run_stream(
-            [pip, "install", "--no-cache-dir", "--progress-bar", "on", "-r", req_path],
-            on_line=self._log_write
-        )
+        req_hash_path = os.path.join(BASE_DIR, "venv", ".req_hash")
+        req_hash = ""
+        try:
+            import hashlib
+            with open(req_path, "rb") as f:
+                req_hash = hashlib.md5(f.read()).hexdigest()
+        except Exception:
+            pass
+
+        last_hash = ""
+        try:
+            with open(req_hash_path, "r") as f:
+                last_hash = f.read().strip()
+        except Exception:
+            pass
+
+        if req_hash and req_hash == last_hash:
+            self._log_write("Requirements unchanged — skipping install.\n")
+            self._set_status("Dependencies already installed ✓")
+            rc = 0
+        else:
+            self._set_status("Installing BetterTTS dependencies…")
+            self._log_write("\n── pip install -r requirements.txt ──\n")
+            rc = run_stream(
+                [pip, "install", "--progress-bar", "on"] + PIP_CACHE + ["-r", req_path],
+                on_line=self._log_write
+            )
+            # Save hash on success so we can skip next time
+            if rc == 0 and req_hash:
+                try:
+                    with open(req_hash_path, "w") as f:
+                        f.write(req_hash)
+                except Exception:
+                    pass
 
         if rc != 0:
             self.after(0, lambda: self._set_task("deps", "error"))

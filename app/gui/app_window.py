@@ -16,46 +16,19 @@ from app.gui.profiles_tab import ProfilesTab
 
 
 class AppWindow(ctk.CTk):
-    def __init__(self):
+    def __init__(self, updater=None):
         super().__init__()
         self.title("BetterTTS")
+        self._icon_path = None
         apply_window_theme(self)
 
-        # Set window icon — must be done after window is fully initialized
-        # customtkinter overrides iconbitmap so we use after() to set it last
+        # Set window icon after window is fully initialized
         try:
             from app.updater import get_base_dir
             icon_path = get_base_dir() / "icon.ico"
             if icon_path.exists():
                 self._icon_path = str(icon_path)
                 self.after(0, self._set_icon)
-        except Exception:
-            pass
-
-    def _set_icon(self):
-        try:
-            self.iconbitmap(self._icon_path)
-            self.wm_iconbitmap(self._icon_path)
-        except Exception:
-            pass
-
-        # Force Windows taskbar to use our icon instead of the Python exe icon
-        try:
-            import ctypes
-            # Set a unique AppUserModelID so Windows treats this as its own app
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                "BetterTTS.App"
-            )
-            # Load the icon and set it on the window handle directly
-            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
-            if not hwnd:
-                hwnd = self.winfo_id()
-            icon = ctypes.windll.user32.LoadImageW(
-                0, self._icon_path, 1, 0, 0, 0x10 | 0x2
-            )
-            if icon:
-                ctypes.windll.user32.SendMessageW(hwnd, 0x0080, 1, icon)  # WM_SETICON ICON_BIG
-                ctypes.windll.user32.SendMessageW(hwnd, 0x0080, 0, icon)  # WM_SETICON ICON_SMALL
         except Exception:
             pass
 
@@ -71,8 +44,8 @@ class AppWindow(ctk.CTk):
             port=self.config_data["port"],
         )
 
-        # Updater set by main.py after window is created
-        self.updater = None
+        # Updater passed in from main.py so it's available immediately
+        self.updater = updater
         self._update_banner = None
         self._pending_update_version = None
 
@@ -106,6 +79,31 @@ class AppWindow(ctk.CTk):
         # Show setup guide on first launch
         if self.config_data.get("show_setup_guide", True):
             self.after(300, self._show_setup_wizard)
+
+    def _set_icon(self):
+        if not self._icon_path:
+            return
+        try:
+            self.iconbitmap(self._icon_path)
+            self.wm_iconbitmap(self._icon_path)
+        except Exception:
+            pass
+
+        # Force Windows taskbar to use our icon
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("BetterTTS.App")
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            if not hwnd:
+                hwnd = self.winfo_id()
+            icon = ctypes.windll.user32.LoadImageW(
+                0, self._icon_path, 1, 0, 0, 0x10 | 0x2
+            )
+            if icon:
+                ctypes.windll.user32.SendMessageW(hwnd, 0x0080, 1, icon)
+                ctypes.windll.user32.SendMessageW(hwnd, 0x0080, 0, icon)
+        except Exception:
+            pass
 
     # ── Header ────────────────────────────────────────────────────────────────
 
@@ -282,7 +280,12 @@ class AppWindow(ctk.CTk):
 
     def _start_update(self):
         """Replace the banner with a progress indicator and kick off the download."""
-        if self._update_banner is None or self.updater is None:
+        print(f"[Updater] _start_update called — banner: {self._update_banner}, updater: {self.updater}")
+        if self._update_banner is None:
+            print("[Updater] No banner — ignoring")
+            return
+        if self.updater is None or self.updater._update_info is None:
+            print(f"[Updater] Updater not ready — updater={self.updater}")
             return
 
         # Clear banner contents and show progress UI

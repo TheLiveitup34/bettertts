@@ -9,6 +9,23 @@ echo   BetterTTS - Local Build
 echo ============================================
 echo.
 
+REM ── Ask for build mode ──
+echo Build mode:
+echo   [1] Release  — copies app\ into dist (for distribution)
+echo   [2] Dev      — symlinks app\ into dist (edit files live, no rebuild)
+echo.
+set /p "BUILD_MODE=Choose mode (1 or 2, default=1): "
+if "!BUILD_MODE!"=="" set "BUILD_MODE=1"
+if "!BUILD_MODE!"=="2" (
+    echo.
+    echo   DEV MODE — app\ will be symlinked into dist\BetterTTS\
+    echo   Changes to app\ files take effect immediately without rebuilding.
+    echo.
+    set "IS_DEV=1"
+) else (
+    set "IS_DEV=0"
+)
+
 REM ── Check venv exists ──
 if not exist "venv\Scripts\python.exe" (
     echo ERROR: Virtual environment not found.
@@ -45,10 +62,8 @@ if not exist "icon.ico" (
     echo The exe will be built without a custom icon.
     echo.
     set "ICON_FLAG="
-    set "ICON_DATA="
 ) else (
     set "ICON_FLAG=--icon=icon.ico"
-    set "ICON_DATA=--add-data "icon.ico;.""
 )
 
 REM ── Check required files exist ──
@@ -73,21 +88,21 @@ if not exist "requirements_build.txt" (
     exit /b 1
 )
 
-REM ── Ask for version ──
-echo.
-set /p "VERSION=Enter version number (e.g. 1.0.0) or press Enter to skip: "
-if "!VERSION!"=="" (
-    echo Skipping version file.
-) else (
-    echo !VERSION!> version.txt
-    echo   Written version.txt = !VERSION!
+REM ── Ask for version (release mode only) ──
+if "!IS_DEV!"=="0" (
+    echo.
+    set /p "VERSION=Enter version number (e.g. 1.0.0) or press Enter to skip: "
+    if "!VERSION!"=="" (
+        echo Skipping version file.
+    ) else (
+        echo !VERSION!> version.txt
+        echo   Written version.txt = !VERSION!
+    )
+    echo.
 )
-echo.
 
 REM ── Clean previous build ──
 echo [1/5] Cleaning previous build...
-
-REM Wipe the entire dist folder so no leftover files cause issues
 if exist "dist" (
     echo   Removing dist\...
     rmdir /s /q "dist" 2>nul
@@ -102,8 +117,6 @@ echo   Done.
 echo.
 
 REM ── Install build-only dependencies ──
-REM Only installs customtkinter + pyinstaller — NOT torch or ML deps
-REM Torch is installed at runtime by the setup wizard for the user's GPU
 echo [2/5] Installing build dependencies (lightweight — no PyTorch)...
 venv\Scripts\pip.exe install -r requirements_build.txt --quiet
 if errorlevel 1 (
@@ -138,8 +151,9 @@ echo [4/5] Building update_helper.exe...
 venv\Scripts\python.exe -m PyInstaller ^
     --noconfirm ^
     --onefile ^
-    --console ^
+    --windowed ^
     --name update_helper ^
+    --collect-all=customtkinter ^
     app\update_helper.py
 
 if errorlevel 1 (
@@ -150,74 +164,118 @@ if errorlevel 1 (
 echo   Done.
 echo.
 
-REM ── Create output folder and move onefile exe into it ──
-echo [5/5] Copying runtime files...
+REM ── Create output folder and copy/link files ──
+echo [5/5] Setting up runtime files...
 if not exist "dist\BetterTTS" mkdir "dist\BetterTTS"
 if exist "dist\BetterTTS.exe" move /y "dist\BetterTTS.exe" "dist\BetterTTS\" >nul
-
+copy /y "dist\update_helper.exe"               "dist\BetterTTS\" >nul
 copy /y "profiles.json"                        "dist\BetterTTS\" >nul
 copy /y "requirements.txt"                     "dist\BetterTTS\" >nul
-xcopy /e /i /y "app"                            "dist\BetterTTS\app\" >nul
-copy /y "dist\update_helper.exe"               "dist\BetterTTS\" >nul
-if exist "icon.ico"                            copy /y "icon.ico"                          "dist\BetterTTS\" >nul
-if exist "version.txt"                         copy /y "version.txt"                       "dist\BetterTTS\" >nul
-if exist "BetterTTS_Streamerbot_Import.txt"    copy /y "BetterTTS_Streamerbot_Import.txt"  "dist\BetterTTS\" >nul
+if exist "icon.ico"                            copy /y "icon.ico"                         "dist\BetterTTS\" >nul
+if exist "version.txt"                         copy /y "version.txt"                      "dist\BetterTTS\" >nul
+if exist "BetterTTS_Streamerbot_Import.txt"    copy /y "BetterTTS_Streamerbot_Import.txt" "dist\BetterTTS\" >nul
 if not exist "dist\BetterTTS\voices"           mkdir "dist\BetterTTS\voices"
 
-REM ── Remove __pycache__ folders — not needed for distribution ──
-for /d /r "dist\BetterTTS" %%d in (__pycache__) do (
-    if exist "%%d" rmdir /s /q "%%d"
+if "!IS_DEV!"=="1" (
+    REM ── DEV MODE: symlink app\ so edits are reflected immediately ──
+    echo   Creating symlink: dist\BetterTTS\app -> %CD%\app
+    REM Remove any existing app folder/link in dist first
+    if exist "dist\BetterTTS\app" (
+        REM Check if it's already a symlink
+        fsutil reparsepoint query "dist\BetterTTS\app" >nul 2>&1
+        if !errorlevel! equ 0 (
+            rmdir "dist\BetterTTS\app" >nul 2>&1
+        ) else (
+            rmdir /s /q "dist\BetterTTS\app" >nul 2>&1
+        )
+    )
+    mklink /J "dist\BetterTTS\app" "%CD%\app"
+    if errorlevel 1 (
+        echo.
+        echo WARNING: Could not create symlink.
+        echo Junction points should work without elevation — try running build.bat as Administrator.
+        echo Falling back to copying app\ instead...
+        echo.
+        xcopy /e /i /y "app" "dist\BetterTTS\app\" >nul
+    ) else (
+        echo   Symlink created successfully.
+        echo   Any changes to app\ files are now live immediately.
+    )
+
+    REM Also symlink venv from project root into dist so app can find it
+    if not exist "dist\BetterTTS\venv" (
+        echo   Creating symlink: dist\BetterTTS\venv -> %CD%\venv
+        mklink /J "dist\BetterTTS\venv" "%CD%\venv" >nul 2>&1
+        if errorlevel 1 (
+            echo   NOTE: Could not symlink venv\, it will need to be set up separately in dist\.
+        ) else (
+            echo   Symlink venv created.
+        )
+    )
+) else (
+    REM ── RELEASE MODE: copy app\ normally ──
+    xcopy /e /i /y "app" "dist\BetterTTS\app\" >nul
+
+    REM Remove __pycache__ — not needed for distribution
+    for /d /r "dist\BetterTTS" %%d in (__pycache__) do (
+        if exist "%%d" rmdir /s /q "%%d"
+    )
 )
 
-REM ── Remove any junk PyInstaller copied into dist that shouldn't be there ──
-echo   Cleaning up PyInstaller artifacts from dist\BetterTTS\...
-if exist "dist\BetterTTS\venv"          rmdir /s /q "dist\BetterTTS\venv"
+REM ── Clean up PyInstaller junk ──
 if exist "dist\BetterTTS\.git"          rmdir /s /q "dist\BetterTTS\.git"
 if exist "dist\BetterTTS\build"         rmdir /s /q "dist\BetterTTS\build"
-if exist "dist\BetterTTS\__pycache__"   rmdir /s /q "dist\BetterTTS\__pycache__"
 if exist "dist\BetterTTS\.gpu_type"     del /q "dist\BetterTTS\.gpu_type"
 if exist "dist\BetterTTS\.startup_in_progress" del /q "dist\BetterTTS\.startup_in_progress"
 
-REM ── Copy any other loose exes from dist\ into BetterTTS\ for easy testing ──
-echo   Copying loose executables into dist\BetterTTS\...
+REM ── Copy any other loose exes from dist\ into BetterTTS\ ──
 for %%f in (dist\*.exe) do (
-    echo     + %%~nxf
     copy /y "%%f" "dist\BetterTTS\" >nul
 )
 echo   Done.
 echo.
 
-REM ── Optional: zip the output ──
-set /p "DO_ZIP=Zip the output? (Y/N): "
-if /i "!DO_ZIP!"=="Y" (
-    if "!VERSION!"=="" (
-        set "ZIP_NAME=BetterTTS-windows.zip"
-    ) else (
-        set "ZIP_NAME=BetterTTS-windows-!VERSION!.zip"
+REM ── Zip (release mode only) ──
+if "!IS_DEV!"=="0" (
+    set /p "DO_ZIP=Zip the output? (Y/N): "
+    if /i "!DO_ZIP!"=="Y" (
+        if "!VERSION!"=="" (
+            set "ZIP_NAME=BetterTTS-windows.zip"
+        ) else (
+            set "ZIP_NAME=BetterTTS-windows-!VERSION!.zip"
+        )
+        if exist "!ZIP_NAME!" del "!ZIP_NAME!"
+        echo Zipping to !ZIP_NAME!...
+        powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+            "Compress-Archive -Path 'dist\BetterTTS\*' -DestinationPath '!ZIP_NAME!'"
+        if errorlevel 1 (
+            echo WARNING: Zip failed.
+        ) else (
+            echo   Created !ZIP_NAME!
+        )
     )
-    if exist "!ZIP_NAME!" del "!ZIP_NAME!"
-    echo Zipping to !ZIP_NAME!...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-        "Compress-Archive -Path 'dist\BetterTTS\*' -DestinationPath '!ZIP_NAME!'"
-    if errorlevel 1 (
-        echo WARNING: Zip failed.
-    ) else (
-        echo   Created !ZIP_NAME!
-    )
+    echo.
 )
 
-echo.
 echo ============================================
-echo   Build complete!
-echo   Output: dist\BetterTTS\BetterTTS.exe
-echo.
-echo   NOTE: PyTorch is NOT bundled in the exe.
-echo   The setup wizard installs it at first launch
-echo   with the correct CUDA version for the user's GPU.
+if "!IS_DEV!"=="1" (
+    echo   DEV BUILD complete!
+    echo   Output: dist\BetterTTS\BetterTTS.exe
+    echo.
+    echo   app\ is symlinked — edit files directly and
+    echo   relaunch BetterTTS.exe to see changes instantly.
+    echo   No rebuild needed for Python file changes.
+) else (
+    echo   RELEASE BUILD complete!
+    echo   Output: dist\BetterTTS\BetterTTS.exe
+    echo.
+    echo   NOTE: PyTorch is NOT bundled in the exe.
+    echo   The setup wizard installs it at first launch.
+)
 echo ============================================
 echo.
 
-REM ── Open output folder for convenience ──
+REM ── Open output folder ──
 explorer "dist\BetterTTS"
 
 pause

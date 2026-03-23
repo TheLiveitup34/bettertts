@@ -135,18 +135,21 @@ warnings.filterwarnings("ignore", message=".*flash.*attn.*")
 warnings.filterwarnings("ignore", message=".*flash-attn.*")
 os.environ["TRANSFORMERS_NO_FLASH_ATTN_WARNING"] = "1"
 
-# ── Fix stdout/stderr for windowless process ──────────────────────────────────
-# When launched via CREATE_NO_WINDOW, sys.stdout and sys.stderr are None or
-# invalid handles. tqdm (used by HuggingFace during model download) calls
-# sys.stdout.flush() which raises OSError Errno 22 Invalid argument.
-# Redirect to a log file so all print/tqdm output is captured cleanly.
+# ── Redirect stdout/stderr to app.log ────────────────────────────────────────
+# Always redirect so tqdm never crashes with Errno 22 on windowless process,
+# and all print/error output is captured to app.log for debugging.
+import io
 _log_file = open(get_base_dir() / "app.log", "w", encoding="utf-8", buffering=1)
-if sys.stdout is None or not hasattr(sys.stdout, 'write'):
-    sys.stdout = _log_file
-if sys.stderr is None or not hasattr(sys.stderr, 'write'):
-    sys.stderr = _log_file
-# Also tell tqdm to disable its progress bars since there's no terminal
+_unbuffered_log = io.TextIOWrapper(
+    _log_file.buffer if hasattr(_log_file, 'buffer') else _log_file,
+    encoding="utf-8",
+    line_buffering=True,
+    write_through=True,
+)
+sys.stdout = _unbuffered_log
+sys.stderr = _unbuffered_log
 os.environ["TQDM_DISABLE"] = "1"
+print(f"[BetterTTS] Logging started — base dir: {get_base_dir()}")
 
 
 # ── Set Windows taskbar app identity ─────────────────────────────────────────
@@ -165,19 +168,22 @@ from app.updater import Updater
 
 def main():
     global _main_window_ref
-    app = AppWindow()
-    _main_window_ref = app
 
-    # Background update check
+    # Create updater first so it can be passed into AppWindow immediately
     def _on_update_available(version: str):
         try:
-            app.after(0, lambda: app.notify_update_available(version))
+            if _main_window_ref is not None:
+                _main_window_ref.after(0, lambda: _main_window_ref.notify_update_available(version))
         except Exception:
             pass
 
     updater = Updater(on_update_available=_on_update_available)
+
+    # Pass updater into AppWindow so self.updater is never None
+    app = AppWindow(updater=updater)
+    _main_window_ref = app
+
     updater.check_async()
-    app.updater = updater
 
     # Mark startup as successful
     clear_startup_flag()

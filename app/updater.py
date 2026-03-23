@@ -1,16 +1,16 @@
 """
-updater.py — Auto-update system for BetterTTS
+updater.py - Auto-update system for BetterTTS
 - Checks GitHub releases for newer versions
 - Downloads and applies updates via update_helper.exe
 - Crash protection via startup flag
 - Auto-rollback if new version fails to start cleanly
 
 Structure after update:
-  BetterTTS.exe          <- onefile launcher (updated)
-  app\                   <- source files run by venv Python (updated)
-  venv\                  <- NOT updated (user's installed deps stay)
-  update_helper.exe      <- NOT updated (can't replace itself)
-  requirements.txt       <- updated (in case deps changed)
+  BetterTTS.exe          - onefile launcher (updated)
+  app/                   - source files run by venv Python (updated)
+  venv/                  - NOT updated (user installed deps stay)
+  update_helper.exe      - NOT updated (cannot replace itself)
+  requirements.txt       - updated (in case deps changed)
 """
 
 import sys
@@ -35,9 +35,12 @@ VERSION_FILE_NAME = "version.txt"
 
 
 def get_base_dir() -> Path:
-    if getattr(sys, 'frozen', False):
-        return Path(sys.executable).parent
-    return Path(__file__).parent.parent
+    """
+    Returns the BetterTTS install directory.
+    app/updater.py lives at <base>/app/updater.py so parent.parent = <base>.
+    Works whether running frozen (launcher) or from venv python (main app).
+    """
+    return Path(__file__).resolve().parent.parent
 
 
 def get_current_version() -> str:
@@ -112,8 +115,8 @@ def check_and_rollback() -> bool:
 
 
 def _apply_rollback(base: Path, backup_dir: Path):
-    """Restore app\ folder and exe from backup."""
-    # Restore app\ folder
+    """Restore app/ folder and exe from backup."""
+    # Restore app/ folder
     backup_app = backup_dir / "app"
     current_app = base / "app"
     if backup_app.exists():
@@ -212,12 +215,13 @@ def download_file(url: str, dest: Path, on_progress: Optional[Callable] = None):
 
 
 def _backup_current(base: Path):
+    """Back up app/, launcher exe, and requirements.txt to _backup/"""
     backup_dir = base / BACKUP_DIR_NAME
     if backup_dir.exists():
         shutil.rmtree(backup_dir)
     backup_dir.mkdir()
 
-    # Backup app\ folder
+    # Backup app/ folder
     app_dir = base / "app"
     if app_dir.exists():
         shutil.copytree(app_dir, backup_dir / "app")
@@ -236,7 +240,17 @@ def _backup_current(base: Path):
 
 
 def apply_update(zip_path: Path, on_status: Optional[Callable] = None):
+    """
+    Extract the update zip to a staging folder then launch update_helper.exe
+    as a detached process to do the file swap after this process exits.
 
+    The zip is expected to contain the full BetterTTS folder structure:
+      app/
+      BetterTTS.exe
+      requirements.txt
+      version.txt
+      etc.
+    """
     base = get_base_dir()
 
     def status(msg):
@@ -286,11 +300,20 @@ def apply_update(zip_path: Path, on_status: Optional[Callable] = None):
 
 
 def cleanup_old_exe():
+    """Remove leftover staging folder from a previous interrupted update."""
     base = get_base_dir()
     staging = base / "_update_staging"
     if staging.exists():
         try:
             shutil.rmtree(staging)
+            print("[Updater] Cleaned up leftover staging folder.")
+        except Exception:
+            pass
+    # Also clean up any leftover .old launcher exe
+    old_exe = base / "BetterTTS.old"
+    if old_exe.exists():
+        try:
+            old_exe.unlink()
         except Exception:
             pass
 
@@ -321,6 +344,7 @@ class Updater:
             self._on_update_available(update["version"])
 
     def download_and_apply(self):
+        """Download and apply update. Call from a background thread."""
         if not self._update_info:
             return
 

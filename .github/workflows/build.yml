@@ -61,8 +61,9 @@ jobs:
           python -m PyInstaller `
             --noconfirm `
             --onefile `
-            --console `
+            --windowed `
             --name update_helper `
+            --collect-all=customtkinter `
             app/update_helper.py
 
       - name: Copy runtime files into dist
