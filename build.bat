@@ -164,6 +164,11 @@ if exist "version.txt"                         copy /y "version.txt"            
 if exist "BetterTTS_Streamerbot_Import.txt"    copy /y "BetterTTS_Streamerbot_Import.txt"  "dist\BetterTTS\" >nul
 if not exist "dist\BetterTTS\voices"           mkdir "dist\BetterTTS\voices"
 
+REM ── Remove __pycache__ folders — not needed for distribution ──
+for /d /r "dist\BetterTTS" %%d in (__pycache__) do (
+    if exist "%%d" rmdir /s /q "%%d"
+)
+
 REM ── Remove any junk PyInstaller copied into dist that shouldn't be there ──
 echo   Cleaning up PyInstaller artifacts from dist\BetterTTS\...
 if exist "dist\BetterTTS\venv"          rmdir /s /q "dist\BetterTTS\venv"

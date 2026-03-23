@@ -80,6 +80,8 @@ jobs:
           Copy-Item -Path "BetterTTS_Streamerbot_Import.txt" -Destination "dist\BetterTTS\" -Force
           Copy-Item -Path "dist\update_helper.exe"             -Destination "dist\BetterTTS\" -Force
           New-Item -ItemType Directory -Path "dist\BetterTTS\voices" -Force | Out-Null
+          # Remove __pycache__ folders — not needed for distribution
+          Get-ChildItem -Path "dist\BetterTTS" -Recurse -Filter "__pycache__" | Remove-Item -Recurse -Force
 
       - name: Zip release
         shell: pwsh
