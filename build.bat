@@ -158,7 +158,7 @@ if exist "dist\BetterTTS.exe" move /y "dist\BetterTTS.exe" "dist\BetterTTS\" >nu
 copy /y "profiles.json"                        "dist\BetterTTS\" >nul
 copy /y "requirements.txt"                     "dist\BetterTTS\" >nul
 xcopy /e /i /y "app"                            "dist\BetterTTS\app\" >nul
-copy /y "dist\update_helper\update_helper.exe" "dist\BetterTTS\" >nul
+copy /y "dist\update_helper.exe"               "dist\BetterTTS\" >nul
 if exist "icon.ico"                            copy /y "icon.ico"                          "dist\BetterTTS\" >nul
 if exist "version.txt"                         copy /y "version.txt"                       "dist\BetterTTS\" >nul
 if exist "BetterTTS_Streamerbot_Import.txt"    copy /y "BetterTTS_Streamerbot_Import.txt"  "dist\BetterTTS\" >nul

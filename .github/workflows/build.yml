@@ -78,7 +78,7 @@ jobs:
           Copy-Item -Path "version.txt"                      -Destination "dist\BetterTTS\" -Force
           Copy-Item -Path "icon.ico"                         -Destination "dist\BetterTTS\" -Force
           Copy-Item -Path "BetterTTS_Streamerbot_Import.txt" -Destination "dist\BetterTTS\" -Force
-          Copy-Item -Path "dist\update_helper\update_helper.exe" -Destination "dist\BetterTTS\" -Force
+          Copy-Item -Path "dist\update_helper.exe"             -Destination "dist\BetterTTS\" -Force
           New-Item -ItemType Directory -Path "dist\BetterTTS\voices" -Force | Out-Null
 
       - name: Zip release
