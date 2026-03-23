@@ -1,0 +1,121 @@
+name: Build & Release BetterTTS
+
+on:
+  push:
+    tags:
+      - 'v*'          # triggers on any tag like v1.0.0, v1.2.3 etc
+  workflow_dispatch:  # allows manual trigger from GitHub Actions tab
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      # ── Checkout ────────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Python ──────────────────────────────────────────────────────────────
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # ── Cache pip dependencies ───────────────────────────────────────────────
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # ── Install dependencies ─────────────────────────────────────────────────
+      - name: Install project dependencies
+        run: pip install -r requirements.txt
+
+      # ── Write version file ───────────────────────────────────────────────────
+      - name: Write version.txt
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}"
+          if ($version -eq "" -or $version -eq "main") {
+            $version = "0.0.0"
+          }
+          $version | Out-File -FilePath version.txt -Encoding utf8 -NoNewline
+          Write-Host "Version: $version"
+
+      # ── Build exe ───────────────────────────────────────────────────────────
+      - name: Build executable
+        shell: pwsh
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --onedir `
+            --windowed `
+            --name BetterTTS `
+            --icon=icon.ico `
+            --collect-all=customtkinter `
+            --hidden-import=sounddevice `
+            --hidden-import=soundfile `
+            --hidden-import=numpy `
+            --add-data "icon.ico;." `
+            --add-data "profiles.json;." `
+            --add-data "version.txt;." `
+            --add-data "app;app" `
+            app/main.py
+
+      # ── Copy runtime files ───────────────────────────────────────────────────
+      - name: Copy runtime files into dist
+        shell: pwsh
+        run: |
+          Copy-Item -Path "profiles.json"                    -Destination "dist\BetterTTS\" -Force
+          Copy-Item -Path "version.txt"                      -Destination "dist\BetterTTS\" -Force
+          Copy-Item -Path "icon.ico"                         -Destination "dist\BetterTTS\" -Force
+          Copy-Item -Path "BetterTTS_Streamerbot_Import.txt" -Destination "dist\BetterTTS\" -Force
+          New-Item -ItemType Directory -Path "dist\BetterTTS\voices" -Force | Out-Null
+
+      # ── Zip the output ───────────────────────────────────────────────────────
+      - name: Zip release
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}"
+          if ($version -eq "" -or $version -eq "main") { $version = "dev" }
+          $zipName = "BetterTTS-windows-$version.zip"
+          Compress-Archive -Path "dist\BetterTTS\*" -DestinationPath $zipName
+          Write-Host "Created: $zipName"
+          echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
+
+      # ── Upload build artifact ────────────────────────────────────────────────
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BetterTTS-windows
+          path: ${{ env.ZIP_NAME }}
+          retention-days: 14
+
+      # ── Create GitHub Release ────────────────────────────────────────────────
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: BetterTTS ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: ${{ env.ZIP_NAME }}
+          body: |
+            ## BetterTTS ${{ github.ref_name }}
+
+            ### Installation
+            1. Download `BetterTTS-windows-${{ github.ref_name }}.zip`
+            2. Extract the zip anywhere on your PC
+            3. Run `BetterTTS.exe`
+            4. On first launch the setup wizard will install dependencies automatically
+
+            ### Requirements
+            - Windows 10 or 11
+            - NVIDIA GPU recommended (4+ GB VRAM) — runs on CPU too, just slower
+            - ~5-8 GB free disk space for model and dependencies
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
