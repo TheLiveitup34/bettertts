@@ -20,8 +20,8 @@ from typing import Optional, Callable
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 
-GITHUB_API_URL = "https://api.github.com/repos/rubensbonc/bettertts/releases/latest"
-GITHUB_REPO_URL = "https://github.com/rubensbonc/bettertts"
+GITHUB_API_URL = "https://api.github.com/repos/TheLiveitup34/bettertts/releases/latest"
+GITHUB_REPO_URL = "https://github.com/TheLiveitup34/bettertts"
 UPDATE_CHECK_TIMEOUT = 10  # seconds
 
 # Written on launch, deleted after clean startup — used for crash detection
