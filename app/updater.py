@@ -243,8 +243,13 @@ def _backup_current(base: Path):
 
 def apply_update(zip_path: Path, on_status: Optional[Callable] = None):
     """
-    Extract the update zip to a staging folder then launch update_helper.exe
-    as a detached process to do the file swap after this process exits.
+    Extract the update zip to a temp staging folder (outside install dir) then
+    launch update_helper.exe as a detached process to do the file swap after
+    this process exits.
+
+    Using tempfile.mkdtemp() ensures staging is always outside the install dir,
+    which satisfies the separation check in update_helper.py and avoids any
+    risk of the staging dir being included in its own copy operation.
 
     The zip is expected to contain the full BetterTTS folder structure:
       app/
@@ -265,57 +270,66 @@ def apply_update(zip_path: Path, on_status: Optional[Callable] = None):
 
     status("Extracting update...")
 
-    # Stage next to the exe so it's on the same drive
-    staging_dir = base / "_update_staging"
-    if staging_dir.exists():
-        shutil.rmtree(staging_dir)
-    staging_dir.mkdir()
+    # Use a system temp dir so staging is guaranteed to be outside install dir.
+    # On Windows this is typically %TEMP% (same drive as AppData), so os.rename
+    # still works for the exe swap in update_helper.
+    staging_dir = Path(tempfile.mkdtemp(prefix="bettertts_update_"))
 
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(staging_dir)
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            # Validate all zip entries before extracting to prevent path traversal
+            staging_resolved = staging_dir.resolve()
+            for entry in zf.namelist():
+                entry_path = (staging_dir / entry).resolve()
+                if not str(entry_path).startswith(str(staging_resolved)):
+                    raise ValueError(f"Zip path traversal attempt blocked: {entry}")
+            zf.extractall(staging_dir)
 
-    # Unwrap single top-level folder into staging_dir directly
-    items = list(staging_dir.iterdir())
-    if len(items) == 1 and items[0].is_dir():
-        inner = items[0]
-        for item in inner.iterdir():
-            shutil.move(str(item), str(staging_dir / item.name))
-        inner.rmdir()
+        # Unwrap single top-level folder into staging_dir directly
+        items = list(staging_dir.iterdir())
+        if len(items) == 1 and items[0].is_dir():
+            inner = items[0]
+            for item in inner.iterdir():
+                shutil.move(str(item), str(staging_dir / item.name))
+            inner.rmdir()
 
-    status("Scheduling update — closing app to apply...")
+        status("Scheduling update — closing app to apply...")
 
-    # Find update_helper.exe next to BetterTTS.exe
-    helper = base / "update_helper.exe"
+        # Find update_helper.exe next to BetterTTS.exe
+        helper = base / "update_helper.exe"
 
-    if helper.exists():
-        cmd = [str(helper), str(os.getpid()), str(staging_dir), str(base)]
-    else:
-        # Fallback to python script for development
-        helper_py = base / "app" / "update_helper.py"
-        cmd = [sys.executable, str(helper_py), str(os.getpid()), str(staging_dir), str(base)]
+        if helper.exists():
+            cmd = [str(helper), str(os.getpid()), str(staging_dir), str(base)]
+        else:
+            # Fallback to python script for development
+            helper_py = base / "app" / "update_helper.py"
+            cmd = [sys.executable, str(helper_py), str(os.getpid()), str(staging_dir), str(base)]
 
-    subprocess.Popen(
-        cmd,
-        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-        close_fds=True,
-    )
+        subprocess.Popen(
+            cmd,
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+            close_fds=True,
+        )
+
+    except Exception:
+        # Clean up staging dir if something went wrong before handing off to helper
+        try:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        except Exception:
+            pass
+        raise
 
 
 def cleanup_old_exe():
-    """Remove leftover staging folder from a previous interrupted update."""
+    """Remove leftover .old launcher exe from a previous interrupted update."""
     base = get_base_dir()
-    staging = base / "_update_staging"
-    if staging.exists():
-        try:
-            shutil.rmtree(staging)
-            print("[Updater] Cleaned up leftover staging folder.")
-        except Exception:
-            pass
-    # Also clean up any leftover .old launcher exe
+    # Staging is now a system temp dir managed by the OS / update_helper,
+    # so there is no fixed _update_staging path to clean up here.
     old_exe = base / "BetterTTS.old"
     if old_exe.exists():
         try:
             old_exe.unlink()
+            print("[Updater] Cleaned up leftover BetterTTS.old.")
         except Exception:
             pass
 

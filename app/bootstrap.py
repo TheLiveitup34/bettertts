@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -76,6 +77,20 @@ BASE_DIR = get_base_dir()
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
 
 
+def _validate_executable(path: str, allowed_names: list) -> bool:
+    """
+    Validate that a resolved executable path has an allowed filename
+    and is an actual file. Prevents PATH hijacking from injected executables.
+    """
+    if not path:
+        return False
+    p = os.path.realpath(path)
+    if not os.path.isfile(p):
+        return False
+    name = os.path.basename(p).lower()
+    return any(name == allowed.lower() for allowed in allowed_names)
+
+
 def run(cmd, **kwargs):
     """Run a shell command and return (returncode, stdout+stderr combined)."""
     result = subprocess.run(
@@ -84,6 +99,7 @@ def run(cmd, **kwargs):
         stderr=subprocess.STDOUT,
         text=True,
         creationflags=_NO_WINDOW,
+        shell=False,
         **kwargs
     )
     return result.returncode, result.stdout
@@ -102,6 +118,7 @@ def run_stream(cmd, on_line, **kwargs):
         text=True,
         bufsize=1,
         creationflags=_NO_WINDOW,
+        shell=False,
         **kwargs
     )
     for line in proc.stdout:
@@ -292,11 +309,11 @@ class SetupWizard(ctk.CTk):
 
         # Cache status + clear button
         cache_dir = os.path.join(
-            os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+            self.validate_and_clean_localappdata(os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))),
             "BetterTTS", "pip_cache"
         )
         cache_stamp = os.path.join(
-            os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+            self.validate_and_clean_localappdata(os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))),
             "BetterTTS", ".cache_stamp"
         )
         cache_exists = os.path.exists(cache_dir) and any(True for _ in os.scandir(cache_dir) if True)
@@ -516,11 +533,15 @@ class SetupWizard(ctk.CTk):
         from app.constants import SUPPORTED_PYTHON_VERSIONS
 
         # Try py launcher first (most reliable on Windows)
+        _PY_ALLOWED = ["py.exe", "py", "python.exe", "python3.exe",
+                       "python3.12.exe", "python3.11.exe", "python3.10.exe",
+                       "python3", "python3.12", "python3.11", "python3.10"]
+
         py = shutil.which("py")
-        if py:
+        if py and _validate_executable(py, ["py.exe", "py"]):
             for major, minor in reversed(SUPPORTED_PYTHON_VERSIONS):
                 rc, out = run([py, f"-{major}.{minor}", "--version"])
-                if rc == 0:
+                if rc == 0 and f"{major}.{minor}" in out:
                     self._log_write(f"Found Python {major}.{minor} via py launcher\n")
                     return [py, f"-{major}.{minor}"]
 
@@ -528,7 +549,7 @@ class SetupWizard(ctk.CTk):
         for major, minor in reversed(SUPPORTED_PYTHON_VERSIONS):
             name = f"python{major}.{minor}" if sys.platform != "win32" else "python"
             found = shutil.which(name)
-            if found:
+            if found and _validate_executable(found, _PY_ALLOWED):
                 rc, out = run([found, "--version"])
                 if rc == 0 and f"{major}.{minor}" in out:
                     self._log_write(f"Found {found}\n")
@@ -537,7 +558,7 @@ class SetupWizard(ctk.CTk):
         # Try plain python/python3 and check version
         for candidate in ["python3", "python"]:
             found = shutil.which(candidate)
-            if found:
+            if found and _validate_executable(found, _PY_ALLOWED):
                 rc, out = run([found, "--version"])
                 if rc == 0:
                     for major, minor in SUPPORTED_PYTHON_VERSIONS:
@@ -584,6 +605,14 @@ class SetupWizard(ctk.CTk):
             self._log_write("Download complete. Installing Python 3.12...\n")
             self._set_status("Installing Python 3.12…")
 
+            # Validate installer path before executing
+            installer_real = os.path.realpath(installer)
+            tmp_real = os.path.realpath(tmp_dir)
+            if not installer_real.startswith(tmp_real + os.sep):
+                raise ValueError("Installer path escaped temp dir")
+            if not installer_real.lower().endswith(".exe"):
+                raise ValueError("Installer must be a .exe file")
+
             # Silent install — current user only, add to PATH, include py launcher
             rc, out = run([
                 installer,
@@ -601,12 +630,22 @@ class SetupWizard(ctk.CTk):
 
             self._log_write("Python 3.12 installed.\n")
 
-            # Refresh PATH in current process so we can find the new python
+            # Refresh PATH from registry — sanitize each entry before adding
             import winreg
             try:
                 with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
                     user_path, _ = winreg.QueryValueEx(key, "Path")
-                    os.environ["PATH"] = user_path + os.pathsep + os.environ.get("PATH", "")
+                    # Sanitize: only keep entries that are real existing directories
+                    # This prevents PATH injection from malicious registry values
+                    safe_entries = []
+                    for entry in user_path.split(os.pathsep):
+                        entry = entry.strip().strip('"')
+                        if entry and os.path.isdir(entry):
+                            # Reject entries with shell metacharacters
+                            if not any(c in entry for c in (";", "&", "|", ">", "<", "`", "$")):
+                                safe_entries.append(entry)
+                    if safe_entries:
+                        os.environ["PATH"] = os.pathsep.join(safe_entries) + os.pathsep + os.environ.get("PATH", "")
             except Exception:
                 pass
 
@@ -694,6 +733,15 @@ class SetupWizard(ctk.CTk):
             self._set_status("Could not find venv pip/python.", "#ef5350")
             return
 
+        # Validate pip and python are inside the venv directory
+        venv_real = os.path.realpath(venv_path)
+        if not os.path.realpath(pip).startswith(venv_real + os.sep):
+            self._set_status("pip path outside venv — aborting.", "#ef5350")
+            return
+        if not os.path.realpath(python).startswith(venv_real + os.sep):
+            self._set_status("python path outside venv — aborting.", "#ef5350")
+            return
+
         # ── Persistent pip cache ──────────────────────────────────────────────────
         # Stored in %LOCALAPPDATA%\BetterTTS\pip_cache
         # Expires after 3 hours — fast reinstall within that window,
@@ -702,27 +750,40 @@ class SetupWizard(ctk.CTk):
         CACHE_MAX_AGE = 3 * 3600  # 3 hours in seconds
 
         cache_dir = os.path.join(
-            os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+            self.validate_and_clean_localappdata(os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))),
             "BetterTTS", "pip_cache"
         )
         cache_stamp = os.path.join(
-            os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+            self.validate_and_clean_localappdata(os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))),
             "BetterTTS", ".cache_stamp"
         )
 
         # Check if cache has expired
         if os.path.exists(cache_stamp):
             try:
-                created_at = float(open(cache_stamp).read().strip())
+                raw = open(cache_stamp).read().strip()
+                # Validate stamp is a plain float — reject anything else
+                created_at = float(raw)
+                if created_at < 0 or created_at > _time.time() + 86400:
+                    raise ValueError("Cache stamp out of valid range")
                 age = _time.time() - created_at
                 if age > CACHE_MAX_AGE:
                     self._log_write(f"pip cache expired ({age/3600:.1f}h old) — clearing...\n")
                     shutil.rmtree(cache_dir, ignore_errors=True)
-                    os.remove(cache_stamp)
+                    try:
+                        os.remove(cache_stamp)
+                    except Exception:
+                        pass
                 else:
                     self._log_write(f"pip cache valid ({age/60:.0f}m old, expires in {(CACHE_MAX_AGE-age)/60:.0f}m)\n")
             except Exception:
-                pass
+                # Corrupt or tampered stamp — wipe cache and start fresh
+                self._log_write("Cache stamp invalid — clearing cache.\n")
+                shutil.rmtree(cache_dir, ignore_errors=True)
+                try:
+                    os.remove(cache_stamp)
+                except Exception:
+                    pass
 
         # Create cache dir and stamp
         os.makedirs(cache_dir, exist_ok=True)
@@ -808,7 +869,10 @@ class SetupWizard(ctk.CTk):
         last_hash = ""
         try:
             with open(req_hash_path, "r") as f:
-                last_hash = f.read().strip()
+                raw_hash = f.read().strip()
+            # Validate it looks like an MD5 hex string — 32 hex chars
+            if len(raw_hash) == 32 and all(c in "0123456789abcdefABCDEF" for c in raw_hash):
+                last_hash = raw_hash
         except Exception:
             pass
 
@@ -858,6 +922,35 @@ class SetupWizard(ctk.CTk):
         self.after(0, lambda: self._set_task("config", "done"))
         step += 1
         self._set_progress(step / steps)
+
+        # ── Save venv to cache so future builds skip PyTorch install ────────────
+        try:
+            venv_cache = os.path.join(
+                self.validate_and_clean_localappdata(os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))),
+                "BetterTTS", "venv_cache"
+            )
+            venv_cache_hash = os.path.join(
+                self.validate_and_clean_localappdata(os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))),
+                "BetterTTS", "venv_cache_req_hash.txt"
+            )
+            venv_src = os.path.join(BASE_DIR, "venv")
+            req_path_for_cache = os.path.join(BASE_DIR, "requirements.txt")
+
+            self._log_write("\nCaching venv for future builds...\n")
+            if os.path.exists(venv_cache):
+                shutil.rmtree(venv_cache, ignore_errors=True)
+            shutil.copytree(venv_src, venv_cache)
+
+            # Save requirements.txt hash so build.bat can invalidate cache
+            import hashlib
+            with open(req_path_for_cache, "rb") as f:
+                req_hash = hashlib.sha256(f.read()).hexdigest()
+            with open(venv_cache_hash, "w") as f:
+                f.write(req_hash)
+
+            self._log_write(f"venv cached to {venv_cache}\n")
+        except Exception as e:
+            self._log_write(f"Could not cache venv (non-fatal): {e}\n")
 
         # Done
         self.after(0, self._show_step_done)
@@ -939,11 +1032,32 @@ class SetupWizard(ctk.CTk):
     def _launch_app(self):
         python = find_venv_python()
         if python:
+            # Validate python path is inside the venv dir — prevent injection
+            venv_dir = os.path.join(BASE_DIR, "venv")
+            python_resolved = os.path.realpath(python)
+            venv_resolved = os.path.realpath(venv_dir)
+            if not python_resolved.startswith(venv_resolved + os.sep):
+                self.destroy()
+                return
+
             main_path = os.path.join(BASE_DIR, "app", "main.py")
             if not os.path.exists(main_path):
                 main_path = os.path.join(BASE_DIR, "main.py")
+
+            # Validate main_path is inside BASE_DIR
+            main_resolved = os.path.realpath(main_path)
+            base_resolved = os.path.realpath(BASE_DIR)
+            if not main_resolved.startswith(base_resolved + os.sep):
+                self.destroy()
+                return
+
             NO_WINDOW = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
-            subprocess.Popen([python, main_path], cwd=BASE_DIR, creationflags=NO_WINDOW)
+            subprocess.Popen(
+                [python, main_path],  # list form — no shell interpretation
+                cwd=BASE_DIR,
+                creationflags=NO_WINDOW,
+                shell=False,          # explicit — never use shell
+            )
         self.destroy()
 
     def _show_error(self, msg):
@@ -960,6 +1074,32 @@ class SetupWizard(ctk.CTk):
         else:
             self.destroy()
 
+    def validate_and_clean_localappdata(self, path):
+        if not sys.path:
+            return None
+
+        # 1. Resolve to eliminate any ../ or ./ traversals and get absolute path
+        try:
+            resolved_path = os.path.realpath(os.path.abspath(path))
+        except (ValueError, OSError):
+            return None
+
+        # 2. Belt-and-suspenders: reject if resolved path still contains traversal sequences
+        if re.search(r'\.\.[/\\]', resolved_path):
+            return None
+
+        # 3. Validate it's an expected local app data path
+        is_windows_appdata = bool(re.search(r'AppData[\\/]Local', resolved_path, re.IGNORECASE))
+        is_unix_home = bool(re.search(r'^/(?:home|Users)/[^/]+', resolved_path))  # /home/user or /Users/user on macOS
+
+        if not is_windows_appdata and not is_unix_home:
+            return None
+
+        # 4. Functional Validation: Does it exist?
+        if os.path.exists(resolved_path):
+            return resolved_path
+
+        return None
 
 # ────────────────────────────────────────────────────────────────────────────────
 
